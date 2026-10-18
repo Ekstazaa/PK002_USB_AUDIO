@@ -53,7 +53,6 @@ DMA_HandleTypeDef hdma_spi2_tx;
 #define USB_AUDIO_I2S_FRAMES       1920U
 #define USB_AUDIO_I2S_SAMPLES      (USB_AUDIO_I2S_FRAMES * 2U)
 #define USB_AUDIO_RING_FRAMES      8192U
-    ((uint32_t)(((uint64_t)USB_AUDIO_INPUT_RATE_HZ << 32) / USB_AUDIO_I2S_RATE_HZ))
 
 /* Circular DMA consumes 40 ms of stereo audio; each half is 20 ms. */
 __ALIGN_BEGIN static uint16_t i2s_dma_buffer[USB_AUDIO_I2S_SAMPLES] __ALIGN_END;
