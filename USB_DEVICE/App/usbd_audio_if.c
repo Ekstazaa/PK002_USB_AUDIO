@@ -277,7 +277,10 @@ static int8_t AUDIO_GetState_FS(void)
 void TransferComplete_CallBack_FS(void)
 {
   /* USER CODE BEGIN 7 */
-  USBD_AUDIO_Sync(&hUsbDeviceFS, AUDIO_OFFSET_FULL);
+  /* I2S DMA finished transmitting the second half of its own buffer. */
+  PK002_Audio_DmaFullCallback();
+  /* Do not call USBD_AUDIO_Sync here: USB samples are already copied
+     to audio_ring, which is independent from the middleware's own buffer. */
   /* USER CODE END 7 */
 }
 
@@ -288,7 +291,9 @@ void TransferComplete_CallBack_FS(void)
 void HalfTransfer_CallBack_FS(void)
 {
   /* USER CODE BEGIN 8 */
-  USBD_AUDIO_Sync(&hUsbDeviceFS, AUDIO_OFFSET_HALF);
+  /* I2S DMA finished transmitting the first half of its own buffer. */
+  PK002_Audio_DmaHalfCallback();
+  /* USB samples are already copied to audio_ring by PeriodicTC. */
   /* USER CODE END 8 */
 }
 
