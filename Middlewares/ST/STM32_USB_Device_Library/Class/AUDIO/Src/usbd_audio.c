@@ -202,7 +202,7 @@ __ALIGN_BEGIN static uint8_t USBD_AUDIO_CfgDesc[USB_AUDIO_CONFIG_DESC_SIZ] __ALI
   AUDIO_CONTROL_HEADER,                 /* bDescriptorSubtype */
   0x00,          /* 1.00 */             /* bcdADC */
   0x01,
-  0x27,                                 /* wTotalLength */
+  0x28,                                 /* wTotalLength */
   0x00,
   0x01,                                 /* bInCollection */
   0x01,                                 /* baInterfaceNr */
@@ -216,22 +216,23 @@ __ALIGN_BEGIN static uint8_t USBD_AUDIO_CfgDesc[USB_AUDIO_CONFIG_DESC_SIZ] __ALI
   0x01,                                 /* wTerminalType AUDIO_TERMINAL_USB_STREAMING   0x0101 */
   0x01,
   0x00,                                 /* bAssocTerminal */
-  0x01,                                 /* bNrChannels */
-  0x00,                                 /* wChannelConfig 0x0000  Mono */
+  0x02,                                 /* bNrChannels: stereo */
+  0x03,                                 /* wChannelConfig: Front Left + Front Right */
   0x00,
   0x00,                                 /* iChannelNames */
   0x00,                                 /* iTerminal */
   /* 12 byte*/
 
   /* USB Speaker Audio Feature Unit Descriptor */
-  0x09,                                 /* bLength */
+  0x0A,                                 /* bLength: master + two channel control fields */
   AUDIO_INTERFACE_DESCRIPTOR_TYPE,      /* bDescriptorType */
   AUDIO_CONTROL_FEATURE_UNIT,           /* bDescriptorSubtype */
   AUDIO_OUT_STREAMING_CTRL,             /* bUnitID */
   0x01,                                 /* bSourceID */
   0x01,                                 /* bControlSize */
-  AUDIO_CONTROL_MUTE,                   /* bmaControls(0) */
-  0,                                    /* bmaControls(1) */
+  AUDIO_CONTROL_MUTE,                   /* bmaControls(0): master mute */
+  0,                                    /* bmaControls(1): left channel */
+  0,                                    /* bmaControls(2): right channel */
   0x00,                                 /* iTerminal */
   /* 09 byte */
 
