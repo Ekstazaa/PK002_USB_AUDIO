@@ -300,7 +300,7 @@ __ALIGN_BEGIN static uint8_t USBD_AUDIO_CfgDesc[USB_AUDIO_CONFIG_DESC_SIZ] __ALI
   AUDIO_STANDARD_ENDPOINT_DESC_SIZE,    /* bLength */
   USB_DESC_TYPE_ENDPOINT,               /* bDescriptorType */
   AUDIO_OUT_EP,                         /* bEndpointAddress 1 out endpoint */
-  USBD_EP_TYPE_ISOC,                    /* bmAttributes */
+  0x05U,                                /* bmAttributes: Isochronous, Adaptive, Data endpoint */
   AUDIO_PACKET_SZE(USBD_AUDIO_FREQ),    /* wMaxPacketSize in Bytes (Freq(Samples)*2(Stereo)*2(HalfWord)) */
   AUDIO_FS_BINTERVAL,                   /* bInterval */
   0x00,                                 /* bRefresh */

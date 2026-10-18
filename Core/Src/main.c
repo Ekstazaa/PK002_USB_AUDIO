@@ -53,9 +53,6 @@ DMA_HandleTypeDef hdma_spi2_tx;
 #define USB_AUDIO_I2S_FRAMES       1920U
 #define USB_AUDIO_I2S_SAMPLES      (USB_AUDIO_I2S_FRAMES * 2U)
 #define USB_AUDIO_RING_FRAMES      8192U
-#define USB_AUDIO_INPUT_RATE_HZ    48000U
-#define USB_AUDIO_I2S_RATE_HZ      48076U
-#define USB_AUDIO_RESAMPLE_STEP_Q32 \
     ((uint32_t)(((uint64_t)USB_AUDIO_INPUT_RATE_HZ << 32) / USB_AUDIO_I2S_RATE_HZ))
 
 /* Circular DMA consumes 40 ms of stereo audio; each half is 20 ms. */
@@ -66,7 +63,6 @@ static volatile uint32_t audio_ring_write = 0U;
 static volatile uint32_t audio_ring_read = 0U;
 static volatile uint32_t audio_ring_overruns = 0U;
 static volatile uint32_t audio_ring_underruns = 0U;
-static uint32_t audio_resample_phase = 0U; /* Q0.32 fractional input-frame position */
 static volatile uint32_t audio_i2s_started = 0U;
 
 #define DEBOUNCE_MS 20U
@@ -153,10 +149,8 @@ void PK002_Audio_Start(void)
 
 /*
  * Refill only the half DMA has finished transmitting.
- *
- * I2S currently runs at approximately 48.076 kHz while USB Audio is 48 kHz.
- * Linear interpolation with a Q0.32 phase consumes 48000/48076 input frames
- * per I2S output frame, preventing the ring from slowly drifting to empty/full.
+ * I2S PLL is configured for 48 kHz, so input and output frames are copied 1:1.
+ * Keep this DMA interrupt callback lightweight to avoid delaying USB service.
  */
 static void PK002_Audio_FillHalf(uint32_t first_sample)
 {
@@ -167,36 +161,12 @@ static void PK002_Audio_FillHalf(uint32_t first_sample)
         const uint32_t dst = first_sample + (2U * f);
         const uint32_t read = audio_ring_read;
         const uint32_t write = audio_ring_write;
-        const uint32_t available = (write >= read)
-            ? (write - read)
-            : (USB_AUDIO_RING_FRAMES - read + write);
 
-        /* Need current and next source frames for interpolation. */
-        if (available >= 2U)
+        if (read != write)
         {
-            const uint32_t next = (read + 1U) % USB_AUDIO_RING_FRAMES;
-            const int32_t left0  = (int16_t)audio_ring[2U * read];
-            const int32_t left1  = (int16_t)audio_ring[2U * next];
-            const int32_t right0 = (int16_t)audio_ring[2U * read + 1U];
-            const int32_t right1 = (int16_t)audio_ring[2U * next + 1U];
-
-            const int64_t left_delta = (int64_t)(left1 - left0) * audio_resample_phase;
-            const int64_t right_delta = (int64_t)(right1 - right0) * audio_resample_phase;
-
-            const int32_t left = left0 + (int32_t)(left_delta >> 32);
-            const int32_t right = right0 + (int32_t)(right_delta >> 32);
-
-            i2s_dma_buffer[dst] = (uint16_t)(int16_t)left;
-            i2s_dma_buffer[dst + 1U] = (uint16_t)(int16_t)right;
-
-            /* Step source phase; with this setup it consumes zero or one frame. */
-            const uint64_t phase_sum =
-                (uint64_t)audio_resample_phase + USB_AUDIO_RESAMPLE_STEP_Q32;
-            const uint32_t consumed = (uint32_t)(phase_sum >> 32);
-            audio_resample_phase = (uint32_t)phase_sum;
-
-            if (consumed != 0U)
-                audio_ring_read = (read + consumed) % USB_AUDIO_RING_FRAMES;
+            i2s_dma_buffer[dst] = audio_ring[2U * read];
+            i2s_dma_buffer[dst + 1U] = audio_ring[2U * read + 1U];
+            audio_ring_read = (read + 1U) % USB_AUDIO_RING_FRAMES;
         }
         else
         {
@@ -204,7 +174,6 @@ static void PK002_Audio_FillHalf(uint32_t first_sample)
             i2s_dma_buffer[dst] = 0U;
             i2s_dma_buffer[dst + 1U] = 0U;
             audio_ring_underruns++;
-            audio_resample_phase = 0U;
         }
     }
 }
