@@ -24,6 +24,8 @@
 /* USER CODE BEGIN Includes */
 #include <math.h>
 #include <stdint.h>
+#include <stddef.h>
+#include "usbd_audio_if.h"
 
 /* USER CODE END Includes */
 
@@ -47,6 +49,26 @@ I2S_HandleTypeDef hi2s2;
 DMA_HandleTypeDef hdma_spi2_tx;
 
 /* USER CODE BEGIN PV */
+/* USB Audio -> I2S bridge: 48 kHz, stereo, signed 16-bit PCM. */
+#define USB_AUDIO_I2S_FRAMES       1920U
+#define USB_AUDIO_I2S_SAMPLES      (USB_AUDIO_I2S_FRAMES * 2U)
+#define USB_AUDIO_RING_FRAMES      8192U
+#define USB_AUDIO_INPUT_RATE_HZ    48000U
+#define USB_AUDIO_I2S_RATE_HZ      48076U
+#define USB_AUDIO_RESAMPLE_STEP_Q32 \
+    ((uint32_t)(((uint64_t)USB_AUDIO_INPUT_RATE_HZ << 32) / USB_AUDIO_I2S_RATE_HZ))
+
+/* Circular DMA consumes 40 ms of stereo audio; each half is 20 ms. */
+__ALIGN_BEGIN static uint16_t i2s_dma_buffer[USB_AUDIO_I2S_SAMPLES] __ALIGN_END;
+/* SPSC ring: USB callback writes, I2S DMA callback reads. */
+static uint16_t audio_ring[USB_AUDIO_RING_FRAMES * 2U];
+static volatile uint32_t audio_ring_write = 0U;
+static volatile uint32_t audio_ring_read = 0U;
+static volatile uint32_t audio_ring_overruns = 0U;
+static volatile uint32_t audio_ring_underruns = 0U;
+static uint32_t audio_resample_phase = 0U; /* Q0.32 fractional input-frame position */
+static volatile uint32_t audio_i2s_started = 0U;
+
 #define DEBOUNCE_MS 20U
 uint8_t button_state = 1;
 uint8_t button_event = 0;
@@ -62,11 +84,143 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_I2S2_Init(void);
 /* USER CODE BEGIN PFP */
+void PK002_Audio_PushUsbPacket(const uint8_t *data, uint32_t size);
+void PK002_Audio_Start(void);
+void PK002_Audio_DmaHalfCallback(void);
+void PK002_Audio_DmaFullCallback(void);
+
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/*
+ * Called from the USB isochronous OUT callback.
+ * USB Audio samples are little-endian interleaved L/R signed 16-bit PCM.
+ * Copy complete stereo frames to our own ring before the middleware reuses
+ * its USB receive buffer for the next packet.
+ */
+void PK002_Audio_PushUsbPacket(const uint8_t *data, uint32_t size)
+{
+    if ((data == NULL) || (size < 4U))
+        return;
+
+    size &= ~3UL; /* Only complete L+R frames (4 bytes) are processed. */
+
+    for (uint32_t i = 0U; i < size; i += 4U)
+    {
+        uint32_t next = (audio_ring_write + 1U) % USB_AUDIO_RING_FRAMES;
+
+        if (next == audio_ring_read)
+        {
+            audio_ring_overruns++;
+            continue; /* Drop newest frame; never overwrite unread samples. */
+        }
+
+        audio_ring[2U * audio_ring_write] =
+            (uint16_t)((uint16_t)data[i] | ((uint16_t)data[i + 1U] << 8));
+        audio_ring[2U * audio_ring_write + 1U] =
+            (uint16_t)((uint16_t)data[i + 2U] | ((uint16_t)data[i + 3U] << 8));
+
+        audio_ring_write = next;
+    }
+}
+
+/*
+ * ST's USB middleware calls AUDIO_CMD_START after receiving the initial USB
+ * buffer. Thus samples are already queued before the I2S output clock starts.
+ */
+void PK002_Audio_Start(void)
+{
+    if (audio_i2s_started != 0U)
+        return;
+
+    for (uint32_t i = 0U; i < USB_AUDIO_I2S_SAMPLES; i++)
+        i2s_dma_buffer[i] = 0U;
+
+    /* Do not reset the ring here: USB packets were queued before START. */
+    if (HAL_I2S_Transmit_DMA(&hi2s2, i2s_dma_buffer,
+                             USB_AUDIO_I2S_SAMPLES) == HAL_OK)
+    {
+        audio_i2s_started = 1U;
+    }
+    else
+    {
+        Error_Handler();
+    }
+}
+
+/*
+ * Refill only the half DMA has finished transmitting.
+ *
+ * I2S currently runs at approximately 48.076 kHz while USB Audio is 48 kHz.
+ * Linear interpolation with a Q0.32 phase consumes 48000/48076 input frames
+ * per I2S output frame, preventing the ring from slowly drifting to empty/full.
+ */
+static void PK002_Audio_FillHalf(uint32_t first_sample)
+{
+    const uint32_t frames = USB_AUDIO_I2S_FRAMES / 2U;
+
+    for (uint32_t f = 0U; f < frames; f++)
+    {
+        const uint32_t dst = first_sample + (2U * f);
+        const uint32_t read = audio_ring_read;
+        const uint32_t write = audio_ring_write;
+        const uint32_t available = (write >= read)
+            ? (write - read)
+            : (USB_AUDIO_RING_FRAMES - read + write);
+
+        /* Need current and next source frames for interpolation. */
+        if (available >= 2U)
+        {
+            const uint32_t next = (read + 1U) % USB_AUDIO_RING_FRAMES;
+            const int32_t left0  = (int16_t)audio_ring[2U * read];
+            const int32_t left1  = (int16_t)audio_ring[2U * next];
+            const int32_t right0 = (int16_t)audio_ring[2U * read + 1U];
+            const int32_t right1 = (int16_t)audio_ring[2U * next + 1U];
+
+            const int64_t left_delta = (int64_t)(left1 - left0) * audio_resample_phase;
+            const int64_t right_delta = (int64_t)(right1 - right0) * audio_resample_phase;
+
+            const int32_t left = left0 + (int32_t)(left_delta >> 32);
+            const int32_t right = right0 + (int32_t)(right_delta >> 32);
+
+            i2s_dma_buffer[dst] = (uint16_t)(int16_t)left;
+            i2s_dma_buffer[dst + 1U] = (uint16_t)(int16_t)right;
+
+            /* Step source phase; with this setup it consumes zero or one frame. */
+            const uint64_t phase_sum =
+                (uint64_t)audio_resample_phase + USB_AUDIO_RESAMPLE_STEP_Q32;
+            const uint32_t consumed = (uint32_t)(phase_sum >> 32);
+            audio_resample_phase = (uint32_t)phase_sum;
+
+            if (consumed != 0U)
+                audio_ring_read = (read + consumed) % USB_AUDIO_RING_FRAMES;
+        }
+        else
+        {
+            /* Output silence on underrun instead of replaying stale samples. */
+            i2s_dma_buffer[dst] = 0U;
+            i2s_dma_buffer[dst + 1U] = 0U;
+            audio_ring_underruns++;
+            audio_resample_phase = 0U;
+        }
+    }
+}
+
+void PK002_Audio_DmaHalfCallback(void)
+{
+    if (audio_i2s_started != 0U)
+        PK002_Audio_FillHalf(0U);
+}
+
+void PK002_Audio_DmaFullCallback(void)
+{
+    if (audio_i2s_started != 0U)
+        PK002_Audio_FillHalf(USB_AUDIO_I2S_SAMPLES / 2U);
+}
+
 
 void Button_Update(void)
 {

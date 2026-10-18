@@ -20,8 +20,19 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "usbd_audio_if.h"
+#include "main.h"
 
 /* USER CODE BEGIN INCLUDE */
+extern void PK002_Audio_PushUsbPacket(const uint8_t *data, uint32_t size);
+extern void PK002_Audio_Start(void);
+extern void PK002_Audio_DmaHalfCallback(void);
+extern void PK002_Audio_DmaFullCallback(void);
+
+/* Inspect these counters in CubeIDE Expressions / debugger. */
+volatile uint32_t usb_audio_debug_packets = 0U;
+volatile uint32_t usb_audio_debug_bytes = 0U;
+volatile uint32_t usb_audio_debug_last_size = 0U;
+volatile uint8_t usb_audio_debug_first_bytes[8] = {0};
 
 /* USER CODE END INCLUDE */
 
@@ -183,17 +194,15 @@ static int8_t AUDIO_DeInit_FS(uint32_t options)
 static int8_t AUDIO_AudioCmd_FS(uint8_t* pbuf, uint32_t size, uint8_t cmd)
 {
   /* USER CODE BEGIN 2 */
-  switch(cmd)
-  {
-    case AUDIO_CMD_START:
-    break;
-
-    case AUDIO_CMD_PLAY:
-    break;
-  }
   UNUSED(pbuf);
   UNUSED(size);
-  UNUSED(cmd);
+
+  if ((cmd == AUDIO_CMD_START) || (cmd == AUDIO_CMD_PLAY))
+  {
+    /* START follows the initial USB buffer fill; PLAY is safe/idempotent. */
+    PK002_Audio_Start();
+  }
+  /* STOP policy is intentionally deferred until basic streaming is verified. */
   return (USBD_OK);
   /* USER CODE END 2 */
 }
@@ -232,9 +241,20 @@ static int8_t AUDIO_MuteCtl_FS(uint8_t cmd)
 static int8_t AUDIO_PeriodicTC_FS(uint8_t *pbuf, uint32_t size, uint8_t cmd)
 {
   /* USER CODE BEGIN 5 */
-  UNUSED(pbuf);
-  UNUSED(size);
   UNUSED(cmd);
+
+  if ((pbuf != NULL) && (size > 0U))
+  {
+    usb_audio_debug_packets++;
+    usb_audio_debug_bytes += size;
+    usb_audio_debug_last_size = size;
+
+    for (uint32_t i = 0U; (i < 8U) && (i < size); i++)
+      usb_audio_debug_first_bytes[i] = pbuf[i];
+
+    PK002_Audio_PushUsbPacket(pbuf, size);
+  }
+
   return (USBD_OK);
   /* USER CODE END 5 */
 }
@@ -273,6 +293,19 @@ void HalfTransfer_CallBack_FS(void)
 }
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_IMPLEMENTATION */
+
+/* The Cube-generated callback wrappers are connected to the HAL DMA callbacks. */
+void HAL_I2S_TxHalfCpltCallback(I2S_HandleTypeDef *hi2s)
+{
+  if ((hi2s != NULL) && (hi2s->Instance == SPI2))
+    HalfTransfer_CallBack_FS();
+}
+
+void HAL_I2S_TxCpltCallback(I2S_HandleTypeDef *hi2s)
+{
+  if ((hi2s != NULL) && (hi2s->Instance == SPI2))
+    TransferComplete_CallBack_FS();
+}
 
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */
 
